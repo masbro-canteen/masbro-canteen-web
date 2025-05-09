@@ -19,7 +19,13 @@ class TenantController extends Controller
             ], 403);
         }
 
-        $tenants = Tenants::with(['listMenu'])->where('user_id', '!=', $request->user()->id)->get();
+        $tenants = Tenants::with(['listMenu', 'pemilik'])
+            ->where('user_id', '!=', $request->user()->id)
+            ->get()
+            ->filter(function ($tenant) {
+                return $tenant->pemilik;
+            })
+            ->values();
 
         return ResponseApi::success(compact('tenants'), 'berhasil mendapatkan data');
     }
@@ -31,7 +37,14 @@ class TenantController extends Controller
             ResponseApi::error('tidak memiliki akses', 403);
         }
 
-        $tenant = Tenants::with(['listMenu'])->find($TenantId);
+        $tenant = Tenants::with(['listMenu', 'pemilik'])->find($TenantId);
+
+        if (!$tenant || !$tenant->pemilik) {
+            return response()->json([
+                'status' => 'failed',
+                'message' => 'Tenant tidak ditemukan atau tidak memiliki pemilik.',
+            ], 404);
+        }
 
         return ResponseApi::success(compact('tenant'), 'berhasil mendapatkan data');
     }

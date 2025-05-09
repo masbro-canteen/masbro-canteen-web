@@ -8,6 +8,10 @@ use App\Models\Tenants;
 use App\Models\Transaksi;
 use App\Models\TransaksiDetail;
 use App\Models\User;
+use App\Models\SaldoKoin;
+use App\Models\TransaksiSaldoKoin;
+use App\Models\Menus;
+use App\Models\Pengaturan;
 use App\Response\ResponseApi;
 use App\Services\Firebases;
 use App\Services\Midtrans;
@@ -22,11 +26,6 @@ use Throwable;
 
 class TransaksiController extends Controller
 {
-    public function index()
-    {
-
-    }
-
     public function orderUser(Request $request)
     {
         $user = $request->user();
@@ -46,7 +45,7 @@ class TransaksiController extends Controller
             ->where('user_id', $user->id)
             ->orderByDesc('created_at')
             ->get();
-
+            
         return response()->json([
             'status' => 'success',
             'message' => 'data berhasil didapatkan',
@@ -54,8 +53,8 @@ class TransaksiController extends Controller
                 'transaksi' => $transaksi
             ],
         ]);
-
     }
+
     public function orderTenant(Request $request)
     {
         $user = $request->user();
@@ -76,24 +75,12 @@ class TransaksiController extends Controller
             with(['listTransaksiDetail.menus.tenants' => function($tenants)use($tenant){
                 $tenants->where('id', $tenant->id);
             }, 'user'])->orderByDesc('created_at')->get();
-            // $baseQuery = DB::table('transaksi_detail')
-            //     ->join('transaksi', 'transaksi.id', 'transaksi_detail.transaksi_id')
-            //     ->join('menus_kelola', 'menus_kelola.id', 'transaksi_detail.menus_kelola_id')
-            //     ->join('menus', 'menus.id', 'menus_kelola.menu_id')
-            //     ->join('tenants', 'tenants.id', 'menus_kelola.tenant_id')
-            //     ->where('tenant_id', @$tenant->id)
-            //     // ->where('status', 'pesanan_masuk')
-            //     ->select('transaksi_detail.*', 'menus.nama as namaMenu', 'tenants.nama_tenant as tenant')
-            //     ->addSelect(DB::raw('transaksi_detail.jumlah * transaksi_detail.harga as subTotal'));
-            // // ->get();
 
-            // $dataPesananMasuk = (clone $baseQuery)->where('transaksi_detail.status', 'pesanan_masuk')->get();
-            // $dataPesanan = (clone $baseQuery)->get();
             return response()->json([
                 "status" => "success",
                 "message" => "Berhasil mengambil data",
                 "data" => [
-                    "transaksi" => $transaksi
+                    "transaksi" => array_values($transaksi->toArray())
                 ]
             ]);
         } catch (Throwable $th) {
@@ -104,24 +91,29 @@ class TransaksiController extends Controller
             ], 500);
         }
     }
+
     public function orderMasbro(Request $request)
     {
         $user = $request->user();
         $permission = $user->can('read order tenant');
-        $permission = true;
-
+        $permission = true; // Ini seharusnya tidak perlu jika permission dicek
+    
         if (!$permission) {
             return response()->json([
                 'status' => 'failed',
                 'message' => 'tidak memiliki akses',
             ], 403);
         }
+    
         try {
-            $transaksi = Transaksi::where('isAntar', 1)->with(['listTransaksiDetail.menus.tenants', 'user'])
-                // ->where('user_id', $user->id)
+            // Filter hanya transaksi dengan driver_id sesuai user yang login
+            $transaksi = Transaksi::where('isAntar', 1)
+                ->where('driver_id', $user->id) // Hanya transaksi milik driver yang login
                 ->whereIn('status', ['siap_diantar', 'diantar', 'selesai'])
+                ->with(['listTransaksiDetail.menus.tenants', 'user'])
                 ->orderByDesc('created_at')
                 ->get();
+    
             return response()->json([
                 "status" => "success",
                 "message" => "Berhasil mengambil data",
@@ -137,11 +129,10 @@ class TransaksiController extends Controller
             ], 500);
         }
     }
-
+    
     public function store(Request $request, Firebases $firebases)
     {
         $user = $request->user();
-        $transaksiCek = new TransaksiCek($user, $request);
         $permission = $user->can('create order');
         $permission = true;
 
@@ -152,27 +143,10 @@ class TransaksiController extends Controller
             ], 403);
         }
 
-        if (!$transaksiCek->antar()) {
-            return response()->json([
-                'status' => 'failed',
-                'message' => 'tidak memiliki akses antar',
-            ], 403);
-        }
-        ;
-
-        if (!$transaksiCek->metodePembayaran()) {
-            return response()->json([
-                'status' => 'failed',
-                'message' => 'tidak memiliki akses transfer atau COD',
-            ], 403);
-        }
-        ;
-
         $validatator = Validator::make($request->all(), [
             'isAntar' => 'required|boolean',
-            'total' => 'required|numeric',
-            'ruangan_id' => 'required_if:isAntar,true', //kurang exists in ruangan
-            'metode_pembayaran' => 'required',
+            'ruangan_id' => 'required_if:isAntar,true',
+            'metode_pembayaran' => 'required|in:koin',
             'catatan' => 'nullable',
             'status' => 'nullable',
             'menus' => 'required|array',
@@ -193,26 +167,49 @@ class TransaksiController extends Controller
                     $kelola->where('id', $menu_id);
                 });
             })->first();
+            
+            if (!$tenantUser) {
+                Log::warning('User tenant tidak ditemukan berdasarkan menu_id', ['menu_id' => $menu_id]);
+            }
 
-            $status = @$request->status ?? ($request->metode_pembayaran == 'cod' ? "pesanan_masuk" : "pending");
+            $status = @$request->status ?? ($request->metode_pembayaran == 'cod' || $request->metode_pembayaran == 'koin' ? "pesanan_masuk" : "pending");
+
+            $totalHargaMenu = 0;
+            foreach ($request->menus as $menu) {
+                $menuModel = Menus::withTrashed()->find($menu['id']);
+                if ($menuModel) {
+                    $totalHargaMenu += $menuModel->harga * $menu['jumlah'];
+                }
+            }
+            
+            $ongkosKirim = Pengaturan::where('nama', 'ongkos_kirim')->value('nilai');
+            $biayaLayanan = Pengaturan::where('nama', 'biaya_layanan')->value('nilai');
+
+            $totalFinal = $totalHargaMenu + ($request->isAntar ? $ongkosKirim : 0) + $biayaLayanan;
+
+            $ruanganId = $request->isAntar ? $request->ruangan_id : null;
+            $ongkosKirimFix = $request->isAntar ? $ongkosKirim : 0;
 
             $transaksi = Transaksi::create([
                 'user_id' => $user->id,
-                'total' => $request->total,
+                'total' => $totalFinal,
                 'isAntar' => $request->isAntar,
                 'metode_pembayaran' => $request->metode_pembayaran,
-                'ruangan_id' => $request->ruangan_id,
-                'ongkos_kirim' => $request->ongkos_kirim ?? 0,
+                'ruangan_id' => $ruanganId,
                 'catatan' => @$request->catatan,
-                'biaya_layanan' => @$request->biaya_layanan ?? 1000,
                 'status' => $status,
+                'ongkos_kirim' => $ongkosKirimFix,
+                'biaya_layanan' => $biayaLayanan,
             ]);
 
             $success = $this->storeTransakasiDetail($request, $transaksi);
 
             if ($success) {
                 DB::commit();
-                $firebases->withNotification('Pesanan Masuk', 'Ada Pesanan Masuk di Tenant Kamu')->sendMessages($tenantUser->fcm_token);
+                if ($tenantUser && $tenantUser->fcm_token) {
+                    $firebases->withNotification('Pesanan Masuk', 'Ada pesanan baru masuk di tenant kamu. Yuk, segera proses!')->sendMessages($tenantUser->fcm_token);
+                } 
+
                 if($status == 'selesai'){
                     return response()->json([
                         "status" => 'success',
@@ -229,77 +226,104 @@ class TransaksiController extends Controller
                     ], 201);
                 }
 
+                if ($transaksi->metode_pembayaran === 'koin') {
+                    $saldo = SaldoKoin::where('user_id', $user->id)->first();
+                
+                    if (!$saldo || $saldo->jumlah < $totalFinal) {
+                        DB::rollBack();
+                        return response()->json([
+                            'status' => 'failed',
+                            'message' => 'Saldo koin tidak cukup',
+                        ], 400);
+                    }
+                
+                    $saldo->jumlah -= $totalFinal;
+                    $saldo->save();
+                
+                    TransaksiSaldoKoin::create([
+                        'user_id' => $user->id,
+                        'jumlah' => -$totalFinal, 
+                        'tipe' => 'keluar',
+                        'deskripsi' => 'Pembayaran pesanan #' . $transaksi->id,
+                    ]);
+                }                
+
                 $transaksi = Transaksi::with(['user', 'listTransaksiDetail.menus'])->where('id', $transaksi->id)->first();
-                $midtrans = new Midtrans();
-                $snapMidtrans = $midtrans->createSnapTransaction($transaksi);
+
+                DB::commit();
 
                 return response()->json([
                     "status" => 'success',
                     'messages' => "transaksi berhasil dibuat",
                     "order_id" => $transaksi->id,
-                    "snap" => $snapMidtrans
                 ], 201);
             } else {
+                DB::rollback();
                 return response()->json([
-                    'statu' => 'failed',
+                    'status' => 'failed',
                     'message' => 'gagal transaksi detail',
                 ], 401);
             }
 
         } catch (Throwable $th) {
             DB::rollback();
-            Log::error($th->getMessage());
-
+            Log::error('Transaksi gagal: ' . $th->getMessage());
+            Log::error('Trace: ' . $th->getTraceAsString());
+        
             return response()->json([
                 'status' => 'failed',
-                'messages' => 'transaksi gagal',
+                'messages' => 'transaksi gagal: ' . $th->getMessage(),
             ], 400);
-        }
+        }        
     }
 
     public function storeTransakasiDetail($request, $transaksi)
     {
         $validator = Validator::make($request->only(['menus']), [
             'menus' => ['required', 'array'],
-            'menus.*.id' => ['required', 'numeric'],
+            'menus.*.id' => ['required', 'numeric', 'exists:menus,id'],
             'menus.*.jumlah' => ['required', 'numeric'],
-            'menus.*.harga' => ['required', 'numeric'],
             'menus.*.catatan' => ['nullable'],
-        ], [
-
         ]);
 
         if ($validator->fails()) {
-            return response()->json([
-                'messages' => $validator->errors()
-            ], 400);
+            return false;
         }
 
-        $dataInsert = array_map(function ($menu) use ($transaksi) {
-            return [
+        $dataInsert = [];
+
+        foreach ($request->menus as $menu) {
+            // Ambil data menu dari database berdasarkan id
+            $menuModel = Menus::withTrashed()->find($menu['id']);
+
+            if (!$menuModel) {
+                // Jika menu tidak ditemukan, skip / bisa juga throw error
+                continue;
+            }
+
+            $dataInsert[] = [
                 'transaksi_id' => $transaksi->id,
                 'menu_id' => $menu['id'],
                 'jumlah' => $menu['jumlah'],
-                'harga' => $menu['harga'],
-                'catatan' => $menu['catatan'] ?? '',
-                'status' => $transaksi->status,
-                'created_at' => Carbon::now(),
-                'updated_at' => Carbon::now(),
+                'harga' => $menuModel->harga * $menu['jumlah'],
+                'catatan' => $menu['catatan'] ?? null,
+                'created_at' => now(),
+                'updated_at' => now(),
             ];
-        }, $request->menus);
+        }
 
-        $transaksiDetail = TransaksiDetail::insert($dataInsert);
+        if (!empty($dataInsert)) {
+            TransaksiDetail::insert($dataInsert);
+            return true;
+        }
 
-        return $transaksiDetail;
+        return false;
     }
 
     public function webHookMidtrans(Request $request, Firebases $firebases)
     {
-        // $payload = $request->getContent();
         $midtrans = new Midtrans();
         $notif = $midtrans->notification();
-
-        // $signatureKey = env('MIDTRANS_SERVER_KEY');
 
         try {
             $transaction = $notif->transaction_status;
@@ -323,9 +347,6 @@ class TransaksiController extends Controller
         } catch (Throwable $th) {
             dd($transaksi);
         }
-        // finally {
-        //     return response()->json(['message' => 'Webhook received']);
-        // }
     }
 
     public function refund(Transaksi $transaksi){
@@ -343,18 +364,64 @@ class TransaksiController extends Controller
         }
     }
 
-    public function cancel($id){
-        try{
-            $midtrans = new Midtrans();
+    public function cancel($id, Firebases $firebases)
+    {
+        try {
+            DB::beginTransaction();
 
-            $status = $midtrans->cancelTransaction($id);
-            Log::info($status);
-            if($status == 200){
-                return ResponseApi::success(null, "Transaksi Berhasil DiBatalkan");
-            }else{
-                return ResponseApi::error("Transaksi Gagal DiBatalkan");
+            $transaksi = Transaksi::find($id);
+
+            if (!$transaksi) {
+                return ResponseApi::error("Transaksi tidak ditemukan", 404);
             }
-        }catch(Throwable $th){
+
+            if (in_array($transaksi->status, ['refund_selesai', 'refund_diproses'])) {
+                return ResponseApi::error("Transaksi sudah direfund sebelumnya", 400);
+            }
+
+            if ($transaksi->status === 'refund_gagal') {
+                return ResponseApi::error("Refund sebelumnya gagal. Silakan hubungi admin", 400);
+            }
+
+            $transaksi->status = 'pesanan_ditolak';
+            $transaksi->save();
+
+            $user = $transaksi->user;
+            if ($user && $user->fcm_token) {
+                $firebases->withNotification('Pesanan Dibatalkan', "Maaf, pesanan {$transaksi->order_id} dibatalkan oleh tenant. Saldo koinmu sudah dikembalikan, ya~")->sendMessages($user->fcm_token);
+            } 
+
+            try {
+                $transaksi->refundKoin();
+
+                TransaksiSaldoKoin::create([
+                    'user_id' => $transaksi->user_id,
+                    'jumlah' => $transaksi->total, 
+                    'tipe' => 'masuk',
+                    'deskripsi' => 'Refund pesanan #' . $transaksi->id,
+                ]);
+
+                $transaksi->status = 'refund_selesai';
+                $transaksi->save();
+                DB::commit();
+
+                if ($user && $user->fcm_token) {
+                    $firebases->withNotification('Refund Berhasil','Koin dari pesanan #' . $transaksi->id . ' telah berhasil dikembalikan ke akun kamu.')->sendMessages($user->fcm_token);
+                }
+
+                return ResponseApi::success(null, "Transaksi dibatalkan dan refund berhasil");
+            } catch (\Throwable $e) {
+                $transaksi->status = 'refund_gagal';
+                $transaksi->save();
+                DB::commit();
+
+                Log::warning("Refund gagal: " . $e->getMessage());
+                return ResponseApi::error("Transaksi dibatalkan, tapi refund gagal. Silakan hubungi admin.");
+            }
+
+        } catch (\Throwable $th) {
+            DB::rollBack();
+            Log::error("Gagal membatalkan transaksi: " . $th->getMessage());
             return ResponseApi::serverError();
         }
     }

@@ -9,16 +9,12 @@ use App\Response\ResponseApi;
 use App\Services\Firebases;
 use Exception;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Validator;
 
 class UserController extends Controller
 {
-    /**
-     * Display a listing of the resource.
-     *
-     * @return \Illuminate\Http\Response
-     */
     public function index(Request $request)
     {
         $user = $request->user();
@@ -50,6 +46,9 @@ class UserController extends Controller
             'email' => $user->email,
             'token' => $token,
             'token_type' => 'Bearer',
+            'isOnline' => $user->isOnline,
+            'phone' => $user->phone,
+            'gambar' => $user->image,
             'role' => $user->getRoleNames(),
             'menu' => $menu,
             'permission' => $permission,
@@ -69,22 +68,6 @@ class UserController extends Controller
         ]);
     }
 
-    /**
-     * Show the form for creating a new resource.
-     *
-     * @return \Illuminate\Http\Response
-     */
-    public function create()
-    {
-
-    }
-
-    /**
-     * Store a newly created resource in storage.
-     *
-     * @param  \Illuminate\Http\Request  $request
-     * @return \Illuminate\Http\Response
-     */
     public function store(Request $request)
     {
         $valdidator = Validator::make($request->all(), [
@@ -108,36 +91,12 @@ class UserController extends Controller
         return $newUser;
     }
 
-    /**
-     * Display the specified resource.
-     *
-     * @param  int  $id
-     * @return \Illuminate\Http\Response
-     */
     public function show($id)
     {
         $user = User::findOrFail($id);
         return response()->json(compact('user'));
     }
 
-    /**
-     * Show the form for editing the specified resource.
-     *
-     * @param  int  $id
-     * @return \Illuminate\Http\Response
-     */
-    public function edit($id)
-    {
-        //
-    }
-
-    /**
-     * Update the specified resource in storage.
-     *
-     * @param  \Illuminate\Http\Request  $request
-     * @param  int  $id
-     * @return \Illuminate\Http\Response
-     */
     public function update(Request $request)
     {
         $user = $request->user();
@@ -155,33 +114,49 @@ class UserController extends Controller
             'name' => ['string', 'nullable'],
             'email'=> ['unique:users,email', 'nullable'],
             'password'=> 'nullable',
-            'isOnline' => ['nullable']
+            'phone'=> 'nullable',
+            'isOnline' => ['nullable'],
+            'image' => ['nullable', 'image', 'mimes:jpg,jpeg,png', 'max:2048'],
         ]);
 
         if($valdidator->fails()){
             return response()->json($valdidator->errors());
         }
 
-        try{
-            $updated = $user->update([
-                "name" => @$request->name ?? $user->name,
-                "email" => @$request->email ?? $user->email,
-                "password" => @$request->password ?? $user->password,
-                "isOnline" => @$request->isOnline ?? $user->isOnline,
-            ]);
+        $url = $user->image;
+        if ($request->hasFile('image')) {
+            $image = $request->file('image');
 
-            if(!$updated){
+            $path = $image->store('public/images');
+
+            $url = Storage::url($path);
+        }
+
+        try{
+            $data = [
+                "name" => $request->name ?? $user->name,
+                "email" => $request->email ?? $user->email,
+                "password" => $request->password ? Hash::make($request->password) : $user->password,
+                "phone" => $request->phone ?? $user->phone,
+                "isOnline" => $request->isOnline ?? $user->isOnline,
+                "image" => @$url ?? $user->image,
+            ];
+    
+            $user->update($data);  
+
+            if(!$user){
                 return response()->json(['messages' => 'Update Gagal']);
             }else{
                 return response()->json([
                     'messages' => 'Update Berhasil',
-                    'data' => $updated
+                    'data' => $user
                 ]);
             }
         }catch(Exception $e){
             return ResponseApi::serverError();
         }
     }
+    
     public function updateFcmToken(Request $request, Firebases $firebases)
     {
         $user = $request->user();
@@ -206,12 +181,6 @@ class UserController extends Controller
         }
     }
 
-    /**
-     * Remove the specified resource from storage.
-     *
-     * @param  int  $id
-     * @return \Illuminate\Http\Response
-     */
     public function destroy($id)
     {
         $deleted = User::findOrFail($id)->delete();

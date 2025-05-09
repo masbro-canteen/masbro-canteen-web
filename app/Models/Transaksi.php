@@ -23,10 +23,11 @@ class Transaksi extends Model
         'biaya_layanan',
         'isAntar',
         'metode_pembayaran',
-        'catatan'
+        'catatan',
+        'driver_id'
     ];
 
-    public $appends = ['sub_total', 'gedung', 'nama_ruangan', "nama_pembeli", "order_id"];
+    protected $appends = ['sub_total', 'gedung', 'nama_ruangan', 'nama_pembeli', 'order_id'];
 
     protected function serializeDate(DateTimeInterface $date)
     {
@@ -40,16 +41,19 @@ class Transaksi extends Model
 
     public function getSubTotalAttribute()
     {
-        return (int)$this->listTransaksiDetail()->sum(DB::raw('harga * jumlah'));
+        return (int)$this->listTransaksiDetail()->sum(DB::raw('harga'));
     }
+
     public function getGedungAttribute()
     {
         return @$this->ruangan->gedung->nama;
     }
+
     public function getNamaPembeliAttribute()
     {
         return @$this->user()->first()->name;
     }
+
     public function getNamaRuanganAttribute()
     {
         return @$this->ruangan->nama_ruangan;
@@ -67,5 +71,21 @@ class Transaksi extends Model
 
     public function ruangan(){
         return $this->belongsTo(Ruangan::class,'ruangan_id','id');
+    }
+
+    public function driver()
+    {
+        return $this->belongsTo(User::class, 'driver_id', 'id');
+    }
+
+    public function refundKoin()
+    {
+        if ($this->status === 'refund_selesai') {
+            throw new \Exception("Transaksi sudah direfund sebelumnya.");
+        }
+
+        $saldo = SaldoKoin::firstOrCreate(['user_id' => $this->user_id]);
+        $saldo->jumlah += $this->total;
+        $saldo->save();
     }
 }

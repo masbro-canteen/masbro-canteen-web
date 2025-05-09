@@ -35,6 +35,24 @@
                         <div class="row">
                             <div class="col">
                                 <div class="mb-3">
+                                    <label for="basicInput" class="form-label">No Telefon</label>
+                                    <input type="text" placeholder="Input Here" class="form-control" id="basicInput"
+                                        name="phone" required>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col">
+                                <div class="mb-3">
+                                    <label for="basicInput" class="form-label">Foto Profil User</label>
+                                    <input type="file" placeholder="Input Here" class="form-control" id="basicInput"
+                                        name="image" required>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col">
+                                <div class="mb-3">
                                     <label for="basicInput" class="form-label">Role</label>
                                     <select name="roles[]" id="" class="form-select" multiple="multiple">
                                         <option></option>
